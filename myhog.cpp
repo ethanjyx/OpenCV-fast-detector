@@ -422,11 +422,79 @@ Rect myHOGCache::getWindow(Size imageSize, Size winStride, int idx) const
     return Rect( x*winStride.width, y*winStride.height, 
 				winSize.width, winSize.height );
 }
+void myHOGDescriptor::compute(const Mat& img, vector<float>& descriptors,
+		Size winStride, Size padding,
+		const vector<Point>& locations) const
+{
+    if( winStride == Size() )
+        winStride = cellSize;
+    Size cacheStride(gcd(winStride.width, blockStride.width),
+                     gcd(winStride.height, blockStride.height));
+    size_t nwindows = locations.size();
+    padding.width = (int)alignSize(std::max(padding.width, 0), 
+									cacheStride.width);
+    padding.height = (int)alignSize(std::max(padding.height, 0), 
+									cacheStride.height);
+    Size paddedImgSize(img.cols + padding.width*2, img.rows + padding.height*2);
+    myHOGCache cache(this, img, padding, padding, nwindows == 0, cacheStride);
+
+    const myHOGCache::BlockData* blockData = &cache.blockData[0];
+
+    int xnum = (paddedImgSize.width - blockSize.width)/(blockStride.width) + 1;
+	int ynum = (paddedImgSize.height - blockSize.height)/
+					(blockStride.height) + 1;
+	int totalBlocks = xnum * ynum;
+
+    int blockHistogramSize = cache.blockHistogramSize; // 36
+    size_t dsize = getDescriptorSize(); // 3780
+	
+	descriptors.resize(blockHistogramSize * totalBlocks);
+	
+    for( size_t i = 0; i < totalBlocks; i++ )
+    {
+        float* descriptor = &descriptors[i*blockHistogramSize];
+       
+        Point pt0;
+        if( !locations.empty() )
+        {
+            pt0 = locations[i];
+            if( pt0.x < -padding.width || 
+				pt0.x > img.cols + padding.width - winSize.width ||
+                pt0.y < -padding.height || 
+				pt0.y > img.rows + padding.height - winSize.height )
+                continue;
+        }
+        else
+        {
+			int x = i % xnum;
+			int y = i / xnum;
+			pt0 = Point(x * blockStride.width, y * blockStride.height)
+					- Point(padding);
+            CV_Assert(pt0.x % cacheStride.width == 0 
+					&& pt0.y % cacheStride.height == 0);
+        }
+
+		Point pt = pt0;
+        float* dst = descriptor;
+        
+		const float* src = cache.getBlock(pt, dst);
+        if( src != dst )
+#ifdef HAVE_IPP
+        ippsCopy_32f(src,dst,blockHistogramSize);
+#else
+        for( int k = 0; k < blockHistogramSize; k++ )
+			dst[k] = src[k];
+#endif
+
+	}
+}
 
 void myHOGDescriptor::detect(const Mat& img,
     vector<Point>& hits, vector<double>& weights, double hitThreshold, 
     Size winStride, Size padding, const vector<Point>& locations) const
 {
+	static double t1 = 0;
+	double t = (double)getTickCount();
 	vector<float> descriptors;
 
     hits.clear();
@@ -493,6 +561,10 @@ void myHOGDescriptor::detect(const Mat& img,
 			dst[k] = src[k];
 #endif
     }
+
+	t1 += (double)getTickCount() - t;
+	printf("computation time = %gms\n", t1*1000./cv::getTickFrequency());
+
 	
 	if( !nwindows )
         nwindows = cache.windowsInImage(paddedImgSize, winStride).area();
