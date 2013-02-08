@@ -261,26 +261,6 @@ const float* myHOGCache::getBlock(Point pt, float* buf)
     CV_Assert( (unsigned)pt.x <= (unsigned)(grad.cols - blockSize.width) &&
                (unsigned)pt.y <= (unsigned)(grad.rows - blockSize.height) );
 
-    if( useCache )
-    {
-        CV_Assert( pt.x % cacheStride.width == 0 &&
-                   pt.y % cacheStride.height == 0 );
-        Point cacheIdx(pt.x/cacheStride.width,
-                      (pt.y/cacheStride.height) % blockCache.rows);
-        if( pt.y != ymaxCached[cacheIdx.y] )
-        {
-            Mat_<uchar> cacheRow = blockCacheFlags.row(cacheIdx.y);
-            cacheRow = (uchar)0;
-            ymaxCached[cacheIdx.y] = pt.y;
-        }
-
-        blockHist = &blockCache[cacheIdx.y][cacheIdx.x*blockHistogramSize];
-        uchar& computedFlag = blockCacheFlags(cacheIdx.y, cacheIdx.x);
-        if( computedFlag != 0 )
-            return blockHist;
-        computedFlag = (uchar)1; // set it at once, before actual computing
-    }
-
     int k, C1 = count1, C2 = count2, C4 = count4;
     const float* gradPtr = (const float*)(grad.data + grad.step*pt.y) + pt.x*2;
     const uchar* qanglePtr = qangle.data + qangle.step*pt.y + pt.x*2;
@@ -493,8 +473,8 @@ void myHOGDescriptor::detect(const Mat& img,
     vector<Point>& hits, vector<double>& weights, double hitThreshold, 
     Size winStride, Size padding, const vector<Point>& locations) const
 {
-	static double t1 = 0;
-	double t = (double)getTickCount();
+//	static double t1 = 0;
+//	double t = (double)getTickCount();
 	vector<float> descriptors;
 
     hits.clear();
@@ -511,7 +491,11 @@ void myHOGDescriptor::detect(const Mat& img,
     padding.height = (int)alignSize(std::max(padding.height, 0), 
 									cacheStride.height);
     Size paddedImgSize(img.cols + padding.width*2, img.rows + padding.height*2);
+
+	//double tcache = (double)getTickCount();
     myHOGCache cache(this, img, padding, padding, nwindows == 0, cacheStride);
+	//tcache = (double)getTickCount() - tcache;
+	//printf("cache time = %gms\n", tcache*1000./cv::getTickFrequency());
 
     const myHOGCache::BlockData* blockData = &cache.blockData[0];
 
@@ -520,8 +504,8 @@ void myHOGDescriptor::detect(const Mat& img,
 					(blockStride.height) + 1;
 	int totalBlocks = xnum * ynum;
 
-    int blockHistogramSize = cache.blockHistogramSize; // 36
-    size_t dsize = getDescriptorSize(); // 3780
+    int blockHistogramSize = cache.blockHistogramSize;
+    size_t dsize = getDescriptorSize();
 	
 	descriptors.resize(blockHistogramSize * totalBlocks);
 	
@@ -538,9 +522,7 @@ void myHOGDescriptor::detect(const Mat& img,
                 pt0.y < -padding.height || 
 				pt0.y > img.rows + padding.height - winSize.height )
                 continue;
-        }
-        else
-        {
+        }else{
 			int x = i % xnum;
 			int y = i / xnum;
 			pt0 = Point(x * blockStride.width, y * blockStride.height)
@@ -562,8 +544,8 @@ void myHOGDescriptor::detect(const Mat& img,
 #endif
     }
 
-	t1 += (double)getTickCount() - t;
-	printf("computation time = %gms\n", t1*1000./cv::getTickFrequency());
+//	t1 += (double)getTickCount() - t;
+//	printf("computation time = %gms\n", t1*1000./cv::getTickFrequency());
 
 	
 	if( !nwindows )
@@ -575,6 +557,7 @@ void myHOGDescriptor::detect(const Mat& img,
 
 	double rho = svmDetector.size() > dsize ? svmDetector[dsize] : 0;
 	
+//	double t2 = (double)getTickCount();
 	vector<Mat> fftDescriptor;
 	fftDescriptor.resize(36);
 	for(unsigned i = 0; i < 36; i++){
@@ -593,44 +576,71 @@ void myHOGDescriptor::detect(const Mat& img,
 		fftDescriptor[posInBlock].at<std::complex<double> >(blockY, blockX) 
 						= descriptors[i];
 	}//correct
+//	t2 = (double)getTickCount() - t2;
+//	printf("refill descriptor = %gms\n", t2*1000./cv::getTickFrequency());
 
-	for(unsigned i = 0; i < 36; i++)
-		dft(fftDescriptor[i], fftDescriptor[i]);
+//	double t3 = (double)getTickCount();
+//	t3 = (double)getTickCount() - t3;
+//	printf("descriptor fft = %gms\n", t3*1000./cv::getTickFrequency());
 	// we need to pad matrix with zeros first here
 	// fftDetector stores the information of the svmDetector
+
+//	double t4 = (double)getTickCount();
+	
 	vector<Mat> fftDetector;
 	fftDetector.resize(36);
+	unsigned numRow = fftSvmDetector[0].rows;
+	unsigned numCol = fftSvmDetector[0].cols;
 	for(unsigned i = 0; i < 36; i++){
 		fftDetector[i].create(ynum + fftSvmDetector[0].rows - 1,
 								xnum + fftSvmDetector[0].cols - 1, CV_64FC2);
 		fftDetector[i].setTo(cv::Scalar::all(0));
 
-		for(unsigned j = 0; j < fftSvmDetector[i].rows; j++){
-			for(unsigned k = 0; k < fftSvmDetector[i].cols; k++){
+		for(unsigned j = 0; j < numRow; j++){
+			for(unsigned k = 0; k < numCol; k++){
 				fftDetector[i].at<std::complex<double> >(j,k) = 
 					fftSvmDetector[i].at<std::complex<double> >(j,k);
 			}
 		}
 	}
+
+//	t4 = (double)getTickCount() - t4;
+//	printf("detector refill = %gms\n", t4*1000./cv::getTickFrequency());
+	
 	// get the dft of svm detector
-	for(unsigned i = 0; i < 36; i++)	
-		dft(fftDetector[i], fftDetector[i]);
-
-	assert((fftDescriptor[0].rows == fftDetector[0].rows) && 
-				fftDescriptor[0].cols == fftDetector[0].cols);
-
+//	double t5 = (double)getTickCount();
+	numRow = fftDescriptor[0].rows;
+	numCol = fftDescriptor[0].cols;
 	for(unsigned i = 0; i < 36; i++){
-		for(unsigned j = 0; j < fftDescriptor[i].rows; j++){
-			for(unsigned k = 0; k < fftDescriptor[i].cols; k++){
+		dft(fftDescriptor[i], fftDescriptor[i]);
+		dft(fftDetector[i], fftDetector[i]);
+		for(unsigned j = 0; j < numRow; j++){
+			for(unsigned k = 0; k < numCol; k++){
 				fftDescriptor[i].at<std::complex<double> >(j,k) = 
 				fftDescriptor[i].at<std::complex<double> >(j,k)
 				* fftDetector[i].at<std::complex<double> >(j,k);
 			}
 		}
+		dft(fftDescriptor[i], fftDescriptor[i], DFT_SCALE|DFT_INVERSE);
 	}
 
-	for(unsigned i = 0; i < 36; i++)
-		dft(fftDescriptor[i], fftDescriptor[i], DFT_SCALE|DFT_INVERSE);
+//	t5 = (double)getTickCount() - t5;
+//	printf("detector fft = %gms\n", t5*1000./cv::getTickFrequency());
+	
+//	assert((fftDescriptor[0].rows == fftDetector[0].rows) && 
+//				fftDescriptor[0].cols == fftDetector[0].cols);
+
+//	double t6 = (double)getTickCount();
+
+//	t6 = (double)getTickCount() - t6;
+//	printf("multiplication = %gms\n", t6*1000./cv::getTickFrequency());
+	
+//	double t7 = (double)getTickCount();
+
+//	for(unsigned i = 0; i < 36; i++)
+
+//	t7 = (double)getTickCount() - t7;
+//	printf("inverse fft = %gms\n", t7*1000./cv::getTickFrequency());
 
 	// the starting point of first window
 	int startX = fftSvmDetector[0].cols - 1;
