@@ -1,8 +1,10 @@
 #include "precomp.hpp"
 #include <iterator>
+#include "/home/yixing/OpenCV-2.4.1/modules/objdetect/src/fft.cpp"
 #ifdef HAVE_IPP
 #include "ipp.h"
 #endif
+#include<time.h>
 
 using namespace std;
 
@@ -473,9 +475,9 @@ void myHOGDescriptor::detect(const Mat& img,
     vector<Point>& hits, vector<double>& weights, double hitThreshold, 
     Size winStride, Size padding, const vector<Point>& locations) const
 {
-//	static double t1 = 0;
 //	double t = (double)getTickCount();
 	vector<float> descriptors;
+//	float* descriptors;
 
     hits.clear();
     if( svmDetector.empty() )
@@ -497,8 +499,6 @@ void myHOGDescriptor::detect(const Mat& img,
 	//tcache = (double)getTickCount() - tcache;
 	//printf("cache time = %gms\n", tcache*1000./cv::getTickFrequency());
 
-    const myHOGCache::BlockData* blockData = &cache.blockData[0];
-
     int xnum = (paddedImgSize.width - blockSize.width)/(blockStride.width) + 1;
 	int ynum = (paddedImgSize.height - blockSize.height)/
 					(blockStride.height) + 1;
@@ -508,7 +508,8 @@ void myHOGDescriptor::detect(const Mat& img,
     size_t dsize = getDescriptorSize();
 	
 	descriptors.resize(blockHistogramSize * totalBlocks);
-	
+//	descriptors = new float[blockHistogramSize * totalBlocks];
+
     for( size_t i = 0; i < totalBlocks; i++ )
     {
         float* descriptor = &descriptors[i*blockHistogramSize];
@@ -544,8 +545,8 @@ void myHOGDescriptor::detect(const Mat& img,
 #endif
     }
 
-//	t1 += (double)getTickCount() - t;
-//	printf("computation time = %gms\n", t1*1000./cv::getTickFrequency());
+//	t = (double)getTickCount() - t;
+//	printf("computation time = %gms\n", t*1000./cv::getTickFrequency());
 
 	
 	if( !nwindows )
@@ -558,7 +559,40 @@ void myHOGDescriptor::detect(const Mat& img,
 	double rho = svmDetector.size() > dsize ? svmDetector[dsize] : 0;
 	
 //	double t2 = (double)getTickCount();
-	vector<Mat> fftDescriptor;
+	int numRows = ynum + 7 - 1; 
+	int numCols = xnum + 15 - 1; 
+	float** fftDescriptor = new float*[36];
+	float** fftDetector = new float*[36];
+	float** descriptorRst = new float*[36];
+	float** detectorRst = new float*[36];
+	float** multiplication = new float*[36];
+	float** finalRst = new float*[36];
+	for(unsigned i = 0 ; i < 36; i++){ 
+		fftDescriptor[i] = new float[2 * numRows * numCols];
+		fftDetector[i] = new float[2 * numRows * numCols];
+		descriptorRst[i] = new float[2 * numRows * numCols];
+		detectorRst[i] = new float[2 * numRows * numCols];
+		multiplication[i] = new float[2 * numRows * numCols];
+		finalRst[i] = new float[2 * numRows * numCols];
+		for(unsigned j = 0; j < 2 * numRows * numCols; j++){
+			fftDescriptor[i][j] = 0;
+			fftDetector[i][j] = 0;
+		}
+	}
+
+	int posInBlock;
+	int blockX;
+	int blockY;
+	int pos;
+	for(unsigned i = 0; i < descriptors.size(); i++){
+		posInBlock = i % 36;
+		blockY = i / (36 * xnum);
+		blockX = (i % (36 * xnum)) / 36;
+		pos = numCols * blockY + blockX;
+		fftDescriptor[posInBlock][2 * pos] = descriptors[i];
+		//fftDescriptor[2 * pos + 1] = 0;
+	}
+/*	vector<Mat> fftDescriptor;
 	fftDescriptor.resize(36);
 	for(unsigned i = 0; i < 36; i++){
 		fftDescriptor[i].create(ynum + fftSvmDetector[0].rows - 1,
@@ -575,47 +609,58 @@ void myHOGDescriptor::detect(const Mat& img,
 		blockX = (i % (36 * xnum)) / 36;
 		fftDescriptor[posInBlock].at<std::complex<double> >(blockY, blockX) 
 						= descriptors[i];
-	}//correct
-//	t2 = (double)getTickCount() - t2;
-//	printf("refill descriptor = %gms\n", t2*1000./cv::getTickFrequency());
+	}
+*/
+	for(int i = svmDetector.size() - 2; i >= 0; i--){
+		posInBlock = i % 36;
+		blockX = xnum - 1 - i / (36 * ynum);
+		blockY = ynum - 1 - (i % (36 * ynum)) / 36;
+		pos = numCols * blockY + blockX;
+//		cerr << i << " " << posInBlock << " " << blockX << " " 
+//			 << blockY << " " << pos << endl;
+		fftDetector[posInBlock][2 * pos] = svmDetector[i];
+	}
 
-//	double t3 = (double)getTickCount();
-//	t3 = (double)getTickCount() - t3;
-//	printf("descriptor fft = %gms\n", t3*1000./cv::getTickFrequency());
-	// we need to pad matrix with zeros first here
-	// fftDetector stores the information of the svmDetector
-
-//	double t4 = (double)getTickCount();
-	
-	vector<Mat> fftDetector;
-	fftDetector.resize(36);
-	unsigned numRow = fftSvmDetector[0].rows;
-	unsigned numCol = fftSvmDetector[0].cols;
 	for(unsigned i = 0; i < 36; i++){
-		fftDetector[i].create(ynum + fftSvmDetector[0].rows - 1,
-								xnum + fftSvmDetector[0].cols - 1, CV_64FC2);
-		fftDetector[i].setTo(cv::Scalar::all(0));
-
-		for(unsigned j = 0; j < numRow; j++){
-			for(unsigned k = 0; k < numCol; k++){
+		fft2d(fftDescriptor[i], descriptorRst[i], numRows, numCols);
+		fft2d(fftDetector[i], detectorRst[i], numRows, numCols);
+		for(unsigned j = 0; j < numRows * numCols; j++){
+			multiplication[i][2*j] = 
+			descriptorRst[i][2*j]*detectorRst[i][2*j]-
+			descriptorRst[i][2*j+1]*detectorRst[i][2*j+1];
+			
+			multiplication[i][2*j+1] = 
+			descriptorRst[i][2*j]*detectorRst[i][2*j+1]+
+			descriptorRst[i][2*j+1]*detectorRst[i][2*j];
+		}
+		fftInverse2d(multiplication[i], finalRst[i], numRows, numCols);
+	}
+	
+/*	vector<Mat> fftDetector;
+	fftDetector.resize(36);
+	unsigned svmRow = fftSvmDetector[0].rows;
+	unsigned svmCol = fftSvmDetector[0].cols;
+	unsigned paddedRow = ynum + svmRow - 1;
+	unsigned paddedCol = xnum + svmCol - 1;
+	for(unsigned i = 0; i < 36; i++){
+		fftDetector[i].create(paddedRow, paddedCol, CV_64FC2);
+		for(unsigned j = 0; j < svmRow; j++){
+			for(unsigned k = 0; k < svmCol; k++){
 				fftDetector[i].at<std::complex<double> >(j,k) = 
 					fftSvmDetector[i].at<std::complex<double> >(j,k);
 			}
 		}
+		for(unsigned j = svmRow; j < paddedRow; j++){
+			for(unsigned k = svmCol; k < paddedCol; k++)
+				fftDetector[i].at<std::complex<double> >(j,k) = 0;
+		}
 	}
 
-//	t4 = (double)getTickCount() - t4;
-//	printf("detector refill = %gms\n", t4*1000./cv::getTickFrequency());
-	
-	// get the dft of svm detector
-//	double t5 = (double)getTickCount();
-	numRow = fftDescriptor[0].rows;
-	numCol = fftDescriptor[0].cols;
 	for(unsigned i = 0; i < 36; i++){
 		dft(fftDescriptor[i], fftDescriptor[i]);
 		dft(fftDetector[i], fftDetector[i]);
-		for(unsigned j = 0; j < numRow; j++){
-			for(unsigned k = 0; k < numCol; k++){
+		for(unsigned j = 0; j < paddedRow; j++){
+			for(unsigned k = 0; k < paddedCol; k++){
 				fftDescriptor[i].at<std::complex<double> >(j,k) = 
 				fftDescriptor[i].at<std::complex<double> >(j,k)
 				* fftDetector[i].at<std::complex<double> >(j,k);
@@ -623,33 +668,14 @@ void myHOGDescriptor::detect(const Mat& img,
 		}
 		dft(fftDescriptor[i], fftDescriptor[i], DFT_SCALE|DFT_INVERSE);
 	}
-
-//	t5 = (double)getTickCount() - t5;
-//	printf("detector fft = %gms\n", t5*1000./cv::getTickFrequency());
-	
-//	assert((fftDescriptor[0].rows == fftDetector[0].rows) && 
-//				fftDescriptor[0].cols == fftDetector[0].cols);
-
-//	double t6 = (double)getTickCount();
-
-//	t6 = (double)getTickCount() - t6;
-//	printf("multiplication = %gms\n", t6*1000./cv::getTickFrequency());
-	
-//	double t7 = (double)getTickCount();
-
-//	for(unsigned i = 0; i < 36; i++)
-
-//	t7 = (double)getTickCount() - t7;
-//	printf("inverse fft = %gms\n", t7*1000./cv::getTickFrequency());
-
-	// the starting point of first window
-	int startX = fftSvmDetector[0].cols - 1;
-	int startY = fftSvmDetector[0].rows - 1;
+*/
+//	int startX = fftSvmDetector[0].cols - 1;
+//	int startY = fftSvmDetector[0].rows - 1;
+	int startX = 15 - 1;
+	int startY = 7 - 1;
+	// the position where the result starts to be used
 	int xWinNum = (paddedImgSize.width - winSize.width)/winStride.width + 1;
 	int yWinNum = (paddedImgSize.height - winSize.height)/winStride.height + 1;
-
-	int startBlockX;
-	int startBlockY;
 
     for( size_t i = 0; i < nwindows; i++ )
     {
@@ -671,12 +697,14 @@ void myHOGDescriptor::detect(const Mat& img,
 
 		double s = rho;
 	
-		startBlockX = startX + (i % xWinNum);
-		startBlockY = startY + (i / xWinNum);
+		blockX = startX + (i % xWinNum);
+		blockY = startY + (i / xWinNum);
+		pos = numCols * blockY + blockX;
 		
 		for(unsigned i = 0; i < 36; i++){
-			s += real(fftDescriptor[i].at<std::complex<double> >
-				(startBlockY, startBlockX));
+//			s += real(fftDescriptor[i].at<std::complex<double> >
+//				(startBlockY, startBlockX));
+			s += finalRst[i][2 * pos];
 		}
 
         if( s >= hitThreshold )
@@ -685,6 +713,20 @@ void myHOGDescriptor::detect(const Mat& img,
             weights.push_back(s);
         }
     }
+	for(unsigned i = 0 ; i < 36; i++){ 
+		delete[] fftDescriptor[i];
+		delete[] fftDetector[i];
+		delete[] descriptorRst[i];
+		delete[] detectorRst[i];
+		delete[] multiplication[i];
+		delete[] finalRst[i];
+	}
+	delete[] fftDescriptor;
+	delete[] fftDetector;
+	delete[] descriptorRst;
+	delete[] detectorRst;
+	delete[] multiplication;
+	delete[] finalRst;
 }
 
 void myHOGDescriptor::detect(const Mat& img, vector<Point>& hits, double hitThreshold, Size winStride, Size padding, const vector<Point>& locations) const
@@ -821,6 +863,7 @@ void myHOGDescriptor::detectMultiScale(
         padding, scale0, finalThreshold, useMeanshiftGrouping);
 }
 
+/*
 void myHOGDescriptor::placeDetector()
 {
 	fftSvmDetector.resize(36);
@@ -852,6 +895,16 @@ void myHOGDescriptor::placeDetector()
 					cout << "!!!" << endl;
 			}
 		}
+	}
+}*/
+
+void myHOGDescriptor::placeDetector()
+{
+	fftSvmDetector = new float[(svmDetector.size() - 1) * 2];
+	unsigned j = 0;
+	for(int i = svmDetector.size() - 2; i >= 0; i--){
+		fftSvmDetector[j++] = svmDetector[i];
+//		fftSvmDetector[i * 2 + 1] = 0;
 	}
 }
 
